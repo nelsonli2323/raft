@@ -72,10 +72,7 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	term := rf.currentTerm
-	isleader := rf.state == Leader
-
-	return term, isleader
+	return rf.currentTerm, rf.state == Leader
 }
 
 // save Raft's persistent state to stable storage,
@@ -149,6 +146,8 @@ type RequestVoteReply struct {
 }
 
 // example RequestVote RPC handler.
+// Grants vote if candidate's term is greater, logs are at least as up to date
+// and has not voted for anther peer already
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -204,8 +203,12 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 type AppendEntriesArgs struct {
-	Term     int
-	LeaderId int
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []LogEntry
+	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
@@ -213,6 +216,8 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
+// Heartbeats (empty entries)
+// Log Replication: replicate if the leaders term not lower and log consistency checks pass
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -223,12 +228,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// hearbeat for now
 	if args.Term < rf.currentTerm {
 		return
-	} else {
+	} else if args.Term > rf.currentTerm {
 		rf.state = Follower
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.lastHeartbeat = time.Now()
 		reply.Success = true
+	}
+
+	if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.Success = false
+		return
+	} else {
+		rf.log = rf.log[:args.PrevLogIndex+1]
+		rf.log = append(rf.log, args.Entries...)
+		if args.LeaderCommit > rf.commitIndex {
+			rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+		}
+		reply.Success = true
+		// persist
 	}
 }
 
@@ -250,13 +268,28 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	index := -1
 	term := -1
-	isLeader := true
+	isLeader := false
 
-	// Your code here (3B).
+	if rf.state == Leader {
+		rf.log = append(rf.log, LogEntry{Term: rf.currentTerm, Command: command})
+		index = len(rf.log) - 1
+		term = rf.currentTerm
+		isLeader = true
+		// persist
+		go rf.replicateLog()
+	}
 
 	return index, term, isLeader
+}
+
+// being replicating new log entries
+func (rf *Raft) replicateLog() {
+
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -278,6 +311,8 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+// Monitor election timeouts
+// Used by leaders to send periodic heartbeats
 func (rf *Raft) ticker() {
 	for !rf.killed() {
 		rf.mu.Lock()
@@ -297,6 +332,8 @@ func (rf *Raft) ticker() {
 	}
 }
 
+// Becomes candidate, increments term, votes for itself and tries to get votes
+// from peers
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
 	rf.currentTerm += 1
@@ -320,6 +357,8 @@ func (rf *Raft) startElection() {
 	}
 }
 
+// Gather vote from peer and update election state
+// If it wins majority of votes, becomes leader and start sending heartbeats
 func (rf *Raft) requestVoteFromPeer(peer int, args *RequestVoteArgs) {
 	reply := &RequestVoteReply{}
 
@@ -350,6 +389,7 @@ func (rf *Raft) requestVoteFromPeer(peer int, args *RequestVoteArgs) {
 	}
 }
 
+// Empty append entries acting as heartbeats
 func (rf *Raft) sendHeartbeats() {
 	for {
 		rf.mu.Lock()
@@ -395,7 +435,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	rf.log = []LogEntry{}
+	rf.log = []LogEntry{{Term: 0}}
 
 	rf.commitIndex = 0
 	rf.lastApplied = 0
