@@ -135,18 +135,40 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
-	// Your data here (3A, 3B).
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
-	// Your data here (3A).
+	Term        int
+	VoteGranted bool
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (3A, 3B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	reply.VoteGranted = false
+
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.state = Follower
+		rf.votedFor = -1
+	}
+
+	// Still need to check if candidates log is at least as up to date
+	if args.Term == rf.currentTerm && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
+		rf.votedFor = args.CandidateId
+		reply.VoteGranted = true
+		rf.lastHeartbeat = time.Now()
+	}
+
+	reply.Term = rf.currentTerm
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -178,6 +200,40 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+
+type AppendEntriesArgs struct {
+	Term     int
+	LeaderId int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	reply.Success = false
+	reply.Term = rf.currentTerm
+
+	// hearbeat for now
+	if args.Term < rf.currentTerm {
+		return
+	} else {
+		rf.state = Follower
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+		rf.lastHeartbeat = time.Now()
+		reply.Success = true
+	}
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -223,15 +279,100 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
+	for !rf.killed() {
+		rf.mu.Lock()
+		state := rf.state
+		lastHeartbeat := rf.lastHeartbeat
+		electionTimeout := rf.electionTimeout
+		rf.mu.Unlock()
 
-		// Your code here (3A)
-		// Check if a leader election should be started.
+		if state != Leader && time.Since(lastHeartbeat) > electionTimeout {
+			rf.startElection()
+		}
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		ms := 50 + (rand.Int63() % 300)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
+	}
+}
+
+func (rf *Raft) startElection() {
+	rf.mu.Lock()
+	rf.currentTerm += 1
+	rf.state = Candidate
+	rf.votedFor = rf.me
+	rf.voteCount = 1
+	term := rf.currentTerm
+	rf.mu.Unlock()
+
+	args := &RequestVoteArgs{
+		Term:        term,
+		CandidateId: rf.me,
+	}
+
+	for i := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+
+		go rf.requestVoteFromPeer(i, args)
+	}
+}
+
+func (rf *Raft) requestVoteFromPeer(peer int, args *RequestVoteArgs) {
+	reply := &RequestVoteReply{}
+
+	if rf.sendRequestVote(peer, args, reply) {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+
+		if rf.state != Candidate || args.Term != rf.currentTerm {
+			return
+		}
+
+		if reply.VoteGranted {
+			rf.voteCount += 1
+
+			if rf.state == Candidate && rf.voteCount > len(rf.peers)/2 {
+				rf.state = Leader
+				for i := range rf.peers {
+					rf.nextIndex[i] = len(rf.log)
+					rf.matchIndex[i] = 0
+				}
+				go rf.sendHeartbeats()
+			}
+		} else if reply.Term > rf.currentTerm {
+			rf.state = Follower
+			rf.currentTerm = reply.Term
+			rf.votedFor = -1
+		}
+	}
+}
+
+func (rf *Raft) sendHeartbeats() {
+	for {
+		rf.mu.Lock()
+		if rf.state != Leader || rf.killed() {
+			rf.mu.Unlock()
+			return
+		}
+
+		args := &AppendEntriesArgs{
+			Term:     rf.currentTerm,
+			LeaderId: rf.me,
+		}
+		rf.mu.Unlock()
+
+		for i := range rf.peers {
+			if i == rf.me {
+				continue
+			}
+
+			reply := &AppendEntriesReply{}
+			go rf.sendAppendEntries(i, args, reply)
+		}
+		time.Sleep(rf.heartbeatInterval)
 	}
 }
 
@@ -265,7 +406,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
 
-	rf.heartbeatInterval = 100 * time.Millisecond
+	rf.heartbeatInterval = 150 * time.Millisecond
 	rf.electionTimeout = time.Duration(300+rand.Int63n(200)) * time.Millisecond
 	rf.lastHeartbeat = time.Now()
 
