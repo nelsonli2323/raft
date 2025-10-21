@@ -542,6 +542,7 @@ func (an *Annotation) cleanup(failed bool, end string) {
 	// models.KvModel simply as a placeholder.
 	info := porcupine.LinearizationInfo{}
 	info.AddAnnotations(annotations)
+        porcupine.Visualize(KvModel, info, file)
 	fmt.Printf("info: wrote visualization to %s\n", file.Name())
 }
 
