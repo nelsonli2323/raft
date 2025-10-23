@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"cpsc416-2025w1/tester1"
+	tester "cpsc416-2025w1/tester1"
 )
 
 // The tester generously allows solutions to complete elections in one second
