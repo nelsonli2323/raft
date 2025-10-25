@@ -42,6 +42,9 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
+	amu       sync.Mutex	// mutex for applier condition
+	appendCond *sync.Cond	// condition variable to signal applier
+
 	// Persistent state
 	currentTerm int
 	votedFor    int // -1 means none
@@ -258,8 +261,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+		rf.appendCond.Signal()
 	}
 
+	
 	reply.Success = true
 }
 
@@ -273,6 +278,8 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) applier() {
 	for !rf.killed() {
 		rf.mu.Lock()
+		rf.appendCond.Wait()
+		
 		for rf.lastApplied < rf.commitIndex {
 			rf.lastApplied++
 			entry := rf.log[rf.lastApplied]
@@ -284,7 +291,7 @@ func (rf *Raft) applier() {
 			rf.applyCh <- msg
 		}
 		rf.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
+
 	}
 }
 
@@ -385,6 +392,7 @@ func (rf *Raft) replicationHeartbeatLoop(peer int) {
 				}
 				if count > len(rf.peers)/2 && rf.log[N].Term == rf.currentTerm {
 					rf.commitIndex = N
+					rf.appendCond.Signal()
 					break
 				}
 			}
@@ -524,6 +532,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *tester.Persister, applyC
 	rf.persister = persister
 	rf.me = me
 	rf.applyCh = applyCh
+	rf.appendCond = sync.NewCond(&rf.mu)
 
 	rf.currentTerm = 0
 	rf.votedFor = -1
