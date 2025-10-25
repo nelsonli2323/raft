@@ -8,12 +8,14 @@ package raft
 
 import (
 	//	"bytes"
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"cpsc416-2025w1/labgob"
+	"cpsc416-2025w1/labgob"
 	"cpsc416-2025w1/labrpc"
 	"cpsc416-2025w1/raftapi"
 	tester "cpsc416-2025w1/tester1"
@@ -85,12 +87,13 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (3C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -98,19 +101,20 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (3C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var votedFor int
+	var currentTerm int
+	var log []LogEntry
+	if d.Decode(&votedFor) != nil ||
+	   d.Decode(&currentTerm) != nil ||
+	   d.Decode(&log) != nil {
+		panic("failed to read persistent state")
+	} else {
+	  rf.votedFor = votedFor
+	  rf.currentTerm = currentTerm
+	  rf.log = log
+	}
 }
 
 // how many bytes in Raft's persisted log?
@@ -165,7 +169,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		lastLogIndex := len(rf.log) - 1
 		lastLogTerm := rf.log[lastLogIndex].Term
 
-		if args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex) {
+		if args.LastLogTerm > lastLogTerm ||
+			(args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex) {
 			rf.votedFor = args.CandidateId
 			rf.lastHeartbeat = time.Now()
 			//persist
@@ -333,7 +338,7 @@ func (rf *Raft) replicationHeartbeatLoop(peer int) {
 			entries = append([]LogEntry{}, rf.log[rf.nextIndex[peer]:]...)
 		} else {
 			entries = nil // heartbeat
-		}
+		} 
 
 		args := &AppendEntriesArgs{
 			Term:         rf.currentTerm,
@@ -422,6 +427,7 @@ func (rf *Raft) ticker() {
 		state := rf.state
 		lastHeartbeat := rf.lastHeartbeat
 		electionTimeout := rf.electionTimeout
+		// smell: unlocking early while still using shared state in latter function calls could be risky
 		rf.mu.Unlock()
 
 		if state != Leader && time.Since(lastHeartbeat) > electionTimeout {
