@@ -11,7 +11,7 @@ import (
 
 	"cpsc416-2025w1/labrpc"
 	"cpsc416-2025w1/raftapi"
-	"cpsc416-2025w1/tester1"
+	tester "cpsc416-2025w1/tester1"
 )
 
 type Test struct {
@@ -216,7 +216,7 @@ func (ts *Test) nCommitted(index int) (int, any) {
 // if retry==true, may submit the command multiple
 // times, in case a leader fails just after Start().
 // if retry==false, calls Start() only once, in order
-// to simplify the early Lab 3B tests.
+// l to simplify the early Lab 3B tests.
 func (ts *Test) one(cmd any, expectedServers int, retry bool) int {
 	var textretry string
 	if retry {

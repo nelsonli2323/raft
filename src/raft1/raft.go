@@ -42,8 +42,7 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
-	amu       sync.Mutex	// mutex for applier condition
-	appendCond *sync.Cond	// condition variable to signal applier
+	appendCond *sync.Cond // condition variable to signal applier
 
 	// Persistent state
 	currentTerm int
@@ -88,12 +87,10 @@ func (rf *Raft) GetState() (int, bool) {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
-	// Your code here (3C).
-	// Example:
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
+	e.Encode(rf.currentTerm)
 	e.Encode(rf.log)
 	raftstate := w.Bytes()
 	rf.persister.Save(raftstate, nil)
@@ -101,7 +98,7 @@ func (rf *Raft) persist() {
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
+	if data == nil || len(data) < 1 {
 		return
 	}
 	r := bytes.NewBuffer(data)
@@ -110,13 +107,13 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm int
 	var log []LogEntry
 	if d.Decode(&votedFor) != nil ||
-	   d.Decode(&currentTerm) != nil ||
-	   d.Decode(&log) != nil {
+		d.Decode(&currentTerm) != nil ||
+		d.Decode(&log) != nil {
 		panic("failed to read persistent state")
 	} else {
-	  rf.votedFor = votedFor
-	  rf.currentTerm = currentTerm
-	  rf.log = log
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
 	}
 }
 
@@ -165,7 +162,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.Term
 		rf.state = Follower
 		rf.votedFor = -1
-		// persist
+		rf.persist()
 	}
 
 	if args.Term == rf.currentTerm && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
@@ -176,7 +173,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			(args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex) {
 			rf.votedFor = args.CandidateId
 			rf.lastHeartbeat = time.Now()
-			//persist
+			rf.persist()
 			reply.VoteGranted = true
 		}
 	}
@@ -226,8 +223,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term          int
+	Success       bool
+	ConflictTerm  int
+	ConflictIndex int
 }
 
 // Heartbeats (empty entries)
@@ -238,6 +237,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Success = false
 	reply.Term = rf.currentTerm
+	reply.ConflictTerm = -1
+	reply.ConflictIndex = -1
 
 	if args.Term < rf.currentTerm {
 		return
@@ -247,24 +248,51 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.currentTerm = args.Term
 	rf.votedFor = -1
 	rf.lastHeartbeat = time.Now()
-	// persist
 
-	if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	rf.persist()
+
+	if args.PrevLogIndex >= len(rf.log) {
+		reply.ConflictIndex = len(rf.log)
 		return
 	}
 
-	rf.log = rf.log[:args.PrevLogIndex+1] // maybe only truncate if there are conflicts
-	if len(args.Entries) > 0 {
-		rf.log = append(rf.log, args.Entries...)
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+
+		reply.ConflictIndex = args.PrevLogIndex
+		for i := args.PrevLogIndex - 1; i >= 0; i-- {
+			if rf.log[i].Term != reply.ConflictTerm {
+				break
+			}
+			reply.ConflictIndex = i
+		}
+		return
 	}
-	// persist
+
+	if len(args.Entries) > 0 {
+		logIndex := args.PrevLogIndex + 1
+		entryIndex := 0
+
+		for logIndex < len(rf.log) && entryIndex < len(args.Entries) {
+			if rf.log[logIndex].Term != args.Entries[entryIndex].Term {
+				rf.log = rf.log[:logIndex]
+				break
+			}
+			logIndex++
+			entryIndex++
+		}
+
+		if entryIndex < len(args.Entries) {
+			rf.log = append(rf.log, args.Entries[entryIndex:]...)
+		}
+	}
 
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
 		rf.appendCond.Signal()
 	}
 
-	
+	rf.persist()
 	reply.Success = true
 }
 
@@ -279,8 +307,8 @@ func (rf *Raft) applier() {
 	for !rf.killed() {
 		rf.mu.Lock()
 		rf.appendCond.Wait()
-		
-		for rf.lastApplied < rf.commitIndex {
+
+		for rf.commitIndex > rf.lastApplied {
 			rf.lastApplied++
 			entry := rf.log[rf.lastApplied]
 			msg := raftapi.ApplyMsg{
@@ -290,8 +318,8 @@ func (rf *Raft) applier() {
 			}
 			rf.applyCh <- msg
 		}
-		rf.mu.Unlock()
 
+		rf.mu.Unlock()
 	}
 }
 
@@ -320,7 +348,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = len(rf.log) - 1
 		term = rf.currentTerm
 		isLeader = true
-		// persist
+		rf.persist()
 		// logs get replicated in replicationHeartbeatLoop
 	}
 
@@ -345,7 +373,7 @@ func (rf *Raft) replicationHeartbeatLoop(peer int) {
 			entries = append([]LogEntry{}, rf.log[rf.nextIndex[peer]:]...)
 		} else {
 			entries = nil // heartbeat
-		} 
+		}
 
 		args := &AppendEntriesArgs{
 			Term:         rf.currentTerm,
@@ -374,7 +402,7 @@ func (rf *Raft) replicationHeartbeatLoop(peer int) {
 			rf.state = Follower
 			rf.currentTerm = reply.Term
 			rf.votedFor = -1
-			// persist
+			rf.persist()
 			rf.mu.Unlock()
 			return
 		}
@@ -396,10 +424,21 @@ func (rf *Raft) replicationHeartbeatLoop(peer int) {
 					break
 				}
 			}
-
 		} else {
-			if rf.nextIndex[peer] > 1 {
-				rf.nextIndex[peer]--
+			if reply.ConflictTerm == -1 {
+				rf.nextIndex[peer] = reply.ConflictIndex
+			} else {
+				foundTerm := false
+				for i := len(rf.log) - 1; i >= 0; i-- {
+					if rf.log[i].Term == reply.ConflictTerm {
+						rf.nextIndex[peer] = i + 1
+						foundTerm = true
+						break
+					}
+				}
+				if !foundTerm {
+					rf.nextIndex[peer] = reply.ConflictIndex
+				}
 			}
 		}
 
@@ -460,6 +499,8 @@ func (rf *Raft) startElection() {
 	term := rf.currentTerm
 	lastLogIndex := len(rf.log) - 1
 	lastLogTerm := rf.log[lastLogIndex].Term
+
+	rf.persist()
 	rf.mu.Unlock()
 
 	args := &RequestVoteArgs{
@@ -512,8 +553,9 @@ func (rf *Raft) requestVoteFromPeer(peer int, args *RequestVoteArgs) {
 			rf.state = Follower
 			rf.currentTerm = reply.Term
 			rf.votedFor = -1
-			// persist
+			rf.persist()
 		}
+
 	}
 }
 
