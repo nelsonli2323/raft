@@ -10,10 +10,11 @@ package raft
 
 import (
 	"fmt"
+	"sync/atomic"
+
 	// "log"
 	"math/rand"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 

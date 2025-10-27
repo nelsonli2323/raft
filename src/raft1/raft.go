@@ -158,6 +158,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	reply.VoteGranted = false
 
+	// already leader, do not grant vote
+	if args.Term == rf.currentTerm && rf.state == Leader {
+		reply.Term = rf.currentTerm
+		return
+	}
+
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.state = Follower
@@ -285,6 +291,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if entryIndex < len(args.Entries) {
 			rf.log = append(rf.log, args.Entries[entryIndex:]...)
 		}
+		rf.persist()
 	}
 
 	if args.LeaderCommit > rf.commitIndex {
@@ -292,7 +299,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.appendCond.Signal()
 	}
 
-	rf.persist()
 	reply.Success = true
 }
 
@@ -304,25 +310,31 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // applies committed logs to applyCh
 // could use condition variables if desired
 func (rf *Raft) applier() {
-	for !rf.killed() {
-		rf.mu.Lock()
-		rf.appendCond.Wait()
+    for !rf.killed() {
+        rf.mu.Lock()
+        
+        for rf.commitIndex <= rf.lastApplied {
+            rf.appendCond.Wait()
+        }
 
-		for rf.commitIndex > rf.lastApplied {
-			rf.lastApplied++
-			entry := rf.log[rf.lastApplied]
-			msg := raftapi.ApplyMsg{
-				CommandValid: true,
-				Command:      entry.Command,
-				CommandIndex: rf.lastApplied,
-			}
-			rf.applyCh <- msg
-		}
-
-		rf.mu.Unlock()
-	}
+        messages := []raftapi.ApplyMsg{}
+        for rf.commitIndex > rf.lastApplied {
+            rf.lastApplied++
+            entry := rf.log[rf.lastApplied]
+            messages = append(messages, raftapi.ApplyMsg{
+                CommandValid: true,
+                Command:      entry.Command,
+                CommandIndex: rf.lastApplied,
+            })
+        }
+        
+        rf.mu.Unlock()
+        
+        for _, msg := range messages {
+            rf.applyCh <- msg
+        }
+    }
 }
-
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -474,7 +486,6 @@ func (rf *Raft) ticker() {
 		state := rf.state
 		lastHeartbeat := rf.lastHeartbeat
 		electionTimeout := rf.electionTimeout
-		// smell: unlocking early while still using shared state in latter function calls could be risky
 		rf.mu.Unlock()
 
 		if state != Leader && time.Since(lastHeartbeat) > electionTimeout {
@@ -523,39 +534,52 @@ func (rf *Raft) startElection() {
 // If it wins majority of votes, becomes leader and start sending heartbeats
 func (rf *Raft) requestVoteFromPeer(peer int, args *RequestVoteArgs) {
 	reply := &RequestVoteReply{}
+	backoff := 10 * time.Millisecond
 
-	if rf.sendRequestVote(peer, args, reply) {
+	for !rf.sendRequestVote(peer, args, reply) && !rf.killed() {
 		rf.mu.Lock()
-		defer rf.mu.Unlock()
-
 		// no longer candidate (another leader sent hearbeats)
 		if rf.state != Candidate || args.Term != rf.currentTerm {
+			rf.mu.Unlock()
 			return
 		}
+		rf.mu.Unlock()
+		time.Sleep(backoff)
+		backoff *= 2
+	}
 
-		if reply.VoteGranted {
-			rf.voteCount += 1
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-			if rf.state == Candidate && rf.voteCount > len(rf.peers)/2 {
-				rf.state = Leader
-				for i := range rf.peers {
-					if i == rf.me {
-						continue
-					}
+	// no longer candidate (another leader sent hearbeats)
+	if rf.state != Candidate || args.Term != rf.currentTerm {
+		return
+	}
 
-					rf.nextIndex[i] = len(rf.log)
-					rf.matchIndex[i] = 0
-					go rf.replicationHeartbeatLoop(i)
+	if reply.VoteGranted {
+		rf.voteCount += 1
+
+		if rf.state == Candidate && rf.voteCount > len(rf.peers)/2 {
+			rf.state = Leader
+
+			rf.nextIndex[rf.me] = len(rf.log)
+			rf.matchIndex[rf.me] = len(rf.log) - 1
+			for i := range rf.peers {
+				if i == rf.me {
+					continue
 				}
 
+				rf.nextIndex[i] = len(rf.log)
+				rf.matchIndex[i] = 0
+				go rf.replicationHeartbeatLoop(i)
 			}
-		} else if reply.Term > rf.currentTerm {
-			rf.state = Follower
-			rf.currentTerm = reply.Term
-			rf.votedFor = -1
-			rf.persist()
-		}
 
+		}
+	} else if reply.Term > rf.currentTerm {
+		rf.state = Follower
+		rf.currentTerm = reply.Term
+		rf.votedFor = -1
+		rf.persist()
 	}
 }
 
