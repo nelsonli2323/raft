@@ -51,10 +51,14 @@ type Raft struct {
 	log         []LogEntry
 
 	// Volatile state
-	commitIndex   int
-	lastApplied   int
-	state         State
+	commitIndex int
+	lastApplied int
+	state       State
+
+	// snapshotting
 	snapshotIndex int
+	snapshotTerm  int
+	snapshotData  []byte
 
 	// Candidate
 	voteCount int
@@ -82,14 +86,15 @@ func (rf *Raft) globalToLocal(global int) int {
 
 func (rf *Raft) getLog(globalIndex int) LogEntry {
 	if globalIndex < rf.snapshotIndex || globalIndex >= rf.localToGlobal(len(rf.log)) {
-		panic(fmt.Sprintf("getLog: global index out of bounds: got %d, snapshotIndex=%d, localLen=%d, log=%v",
-			globalIndex, rf.snapshotIndex, len(rf.log), rf.log))
+		panic(fmt.Sprintf("server: %v getLog: global index out of bounds: got %d, snapshotIndex=%d, localLen=%d, log=%v",
+			rf.me, globalIndex, rf.snapshotIndex, len(rf.log), rf.log))
 	}
-	return rf.log[rf.globalToLocal(globalIndex)]
-}
 
-func (rf *Raft) hasLocalIndex(globalIndex int) bool {
-	return globalIndex >= rf.snapshotIndex && globalIndex < rf.snapshotIndex+len(rf.log)
+	if globalIndex == rf.snapshotIndex {
+		return LogEntry{Term: rf.snapshotTerm, Command: nil}
+	}
+
+	return rf.log[rf.globalToLocal(globalIndex)]
 }
 
 // return currentTerm and whether this server
@@ -115,8 +120,9 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.log)
 	e.Encode(rf.snapshotIndex)
+	e.Encode(rf.snapshotTerm)
 	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, nil)
+	rf.persister.Save(raftstate, rf.snapshotData)
 }
 
 // restore previously persisted state.
@@ -130,17 +136,22 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm int
 	var log []LogEntry
 	var snapshotIndex int
+	var snapshotTerm int
 	if d.Decode(&votedFor) != nil ||
 		d.Decode(&currentTerm) != nil ||
 		d.Decode(&log) != nil ||
-		d.Decode(&snapshotIndex) != nil {
+		d.Decode(&snapshotIndex) != nil ||
+		d.Decode(&snapshotTerm) != nil {
 		panic("failed to read persistent state")
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
 		rf.snapshotIndex = snapshotIndex
+		rf.snapshotTerm = snapshotTerm
 	}
+
+	rf.snapshotData = rf.persister.ReadSnapshot()
 }
 
 // how many bytes in Raft's persisted log?
@@ -155,11 +166,22 @@ func (rf *Raft) PersistBytes() int {
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
+	DPrintf("SNAPSHOTTING for server: %v at index %v", rf.me, index)
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.log = rf.log[rf.globalToLocal(index)+1:]
+	DPrintf("1!!! calling getlog for index %v", index)
+
+	rf.snapshotTerm = rf.getLog(index).Term
+	rf.snapshotData = snapshot
+
+	rf.log = append([]LogEntry{{Term: 0}}, rf.log[rf.globalToLocal(index)+1:]...)
 	rf.snapshotIndex = index
+
+	DPrintf("server %v setting last applied to max of last applied %v and index %v", rf.me, rf.lastApplied, index)
+	rf.lastApplied = max(rf.lastApplied, index)
+	rf.commitIndex = max(rf.commitIndex, index)
+
 	rf.persist()
+	rf.mu.Unlock()
 }
 
 type InstallSnapshotArgs struct {
@@ -170,20 +192,70 @@ type InstallSnapshotArgs struct {
 	Data              []byte
 }
 type InstallSnapshotReply struct {
-	Term int
+	Term    int
+	Success bool
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	return ok
 }
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
-	// Your code here (3D).
+	rf.mu.Lock()
+
+	reply.Term = rf.currentTerm
+	reply.Success = false
+
+	// new term or snapshot is more up to date (ie. stale snapshot was sent)
+	if args.Term < rf.currentTerm || args.LastIncludedIndex <= rf.snapshotIndex {
+		rf.mu.Unlock()
+		return
+	}
+
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.state = Follower
+		rf.votedFor = -1
+		rf.persist()
+	}
+
+	rf.lastHeartbeat = time.Now()
+
+	DPrintf("2!!! calling getLog for index %v", args.LastIncludedIndex)
+	if args.LastIncludedIndex < rf.localToGlobal(len(rf.log)) && rf.getLog(args.LastIncludedIndex).Term == args.LastIncludedTerm {
+		rf.log = append([]LogEntry{{Term: 0}}, rf.log[rf.globalToLocal(args.LastIncludedIndex)+1:]...)
+	} else {
+		rf.log = []LogEntry{{Term: 0}}
+	}
+
+	rf.snapshotData = args.Data
+	rf.snapshotIndex = args.LastIncludedIndex
+	rf.snapshotTerm = args.LastIncludedTerm
+
+	DPrintf("server %v setting last applied to max of last applied %v and last included index %v", rf.me, rf.lastApplied, args.LastIncludedIndex)
+	rf.lastApplied = max(rf.lastApplied, args.LastIncludedIndex)
+	rf.commitIndex = max(rf.commitIndex, args.LastIncludedIndex)
+
+	reply.Success = true
+
+	rf.persist()
+	rf.mu.Unlock()
+
+	rf.applyCh <- raftapi.ApplyMsg{
+		SnapshotValid: true,
+		Snapshot:      args.Data,
+		SnapshotTerm:  args.LastIncludedTerm,
+		SnapshotIndex: args.LastIncludedIndex,
+	}
 }
 
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
 type RequestVoteArgs struct {
-	Term         int
-	CandidateId  int
-	LastLogIndex int
-	LastLogTerm  int
+	Term          int
+	CandidateId   int
+	LastLogIndex  int
+	LastLogTerm   int
+	SnapshotIndex int
 }
 
 // example RequestVote RPC reply structure.
@@ -217,10 +289,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	if args.Term == rf.currentTerm && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
 		lastLogIndex := rf.localToGlobal(len(rf.log) - 1)
+		DPrintf("3!!! calling getLog for index %v", lastLogIndex)
 		lastLogTerm := rf.getLog(lastLogIndex).Term
+		DPrintf("Candidate: %v, Term: %v, LastLogIndex: %v, LastLogTerm: %v SnapshotIndex: %v\n", args.CandidateId, args.Term, args.LastLogIndex, args.LastLogTerm, rf.snapshotIndex)
+		DPrintf("Follower: %v, Term: %v, LastLogIndex: %v, LastLogTerm: %v SnapshotIndex: %v\n", rf.me, rf.currentTerm, lastLogIndex, lastLogTerm, rf.snapshotIndex)
 
 		if args.LastLogTerm > lastLogTerm ||
 			(args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex) {
+			DPrintf("granting vote")
 			rf.votedFor = args.CandidateId
 			rf.lastHeartbeat = time.Now()
 			rf.persist()
@@ -301,24 +377,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	rf.persist()
 
-	// if args.PrevLogIndex < rf.snapshotIndex {
-	// 	// The leader refers to an index earlier than our snapshot. We should tell leader to send snapshot.
-	// 	reply.ConflictIndex = rf.snapshotIndex
-	// 	reply.ConflictTerm = -1
-	// 	return
-	// }
-	// lastStoredGlobal := rf.snapshotIndex + len(rf.log) - 1
+	// the log index is beyond current log
 	if args.PrevLogIndex >= rf.localToGlobal(len(rf.log)) {
-		// follower is missing entries up to PrevLogIndex
-		reply.ConflictIndex = rf.localToGlobal(len(rf.log)) // ask leader to step back to last stored + 1
+		DPrintf("in here1")
+		reply.ConflictIndex = rf.localToGlobal(len(rf.log))
 		return
 	}
 
+	if args.PrevLogIndex < rf.snapshotIndex {
+		DPrintf("in here2")
+		reply.ConflictIndex = rf.snapshotIndex + 1
+		return
+	}
+
+	DPrintf("4!!! calling getLog for index %v", args.PrevLogIndex)
 	if rf.getLog(args.PrevLogIndex).Term != args.PrevLogTerm {
+		DPrintf("5!!! calling getLog for index %v", args.PrevLogIndex)
 		reply.ConflictTerm = rf.getLog(args.PrevLogIndex).Term
 
 		reply.ConflictIndex = args.PrevLogIndex
 		for i := args.PrevLogIndex - 1; i >= rf.snapshotIndex; i-- {
+			DPrintf("6!!! calling getLog for index %v", i)
 			if rf.getLog(i).Term != reply.ConflictTerm {
 				break
 			}
@@ -332,6 +411,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		entryIndex := 0
 
 		for logIndex < rf.localToGlobal(len(rf.log)) && entryIndex < len(args.Entries) {
+			DPrintf("7!!! calling getLog for index %v", logIndex)
 			if rf.getLog(logIndex).Term != args.Entries[entryIndex].Term {
 				rf.log = rf.log[:rf.globalToLocal(logIndex)]
 				break
@@ -342,11 +422,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if entryIndex < len(args.Entries) {
 			rf.log = append(rf.log, args.Entries[entryIndex:]...)
 		}
+
 		rf.persist()
 	}
 
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, rf.localToGlobal(len(rf.log)-1))
+		DPrintf("3 --- server: %v, snapshotIndex: %v, log: %v, commitIndex: %v", rf.me, rf.snapshotIndex, rf.log, rf.commitIndex)
 		rf.appendCond.Signal()
 	}
 
@@ -368,9 +450,16 @@ func (rf *Raft) applier() {
 			rf.appendCond.Wait()
 		}
 
+		if rf.lastApplied < rf.snapshotIndex {
+			rf.lastApplied = rf.snapshotIndex
+			rf.mu.Unlock()
+			continue
+		}
+
 		messages := []raftapi.ApplyMsg{}
 		for rf.commitIndex > rf.lastApplied {
 			rf.lastApplied++
+			DPrintf("8!!! calling getLog for index %v", rf.lastApplied)
 			entry := rf.getLog(rf.lastApplied)
 			messages = append(messages, raftapi.ApplyMsg{
 				CommandValid: true,
@@ -408,6 +497,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := false
 
 	if rf.state == Leader {
+		DPrintf("server %v received command %v", rf.me, command)
 		rf.log = append(rf.log, LogEntry{Term: rf.currentTerm, Command: command})
 		index = rf.localToGlobal(len(rf.log) - 1)
 		term = rf.currentTerm
@@ -430,15 +520,47 @@ func (rf *Raft) replicationHeartbeatLoop(peer int) {
 		}
 
 		prevIndex := rf.nextIndex[peer] - 1
+		DPrintf("5.1 --- server: %v, prevIndex: %v, snapshotIndex: %v, isSmaller: %v", rf.me, prevIndex, rf.snapshotIndex, prevIndex < rf.snapshotIndex)
+
+		if rf.nextIndex[peer] <= rf.snapshotIndex {
+			DPrintf("5 --- server: %v, prevIndex: %v, snapshotIndex: %v, log: %v", rf.me, prevIndex, rf.snapshotIndex, rf.log)
+			args := &InstallSnapshotArgs{
+				Term:              rf.currentTerm,
+				LeaderId:          rf.me,
+				LastIncludedIndex: rf.snapshotIndex,
+				LastIncludedTerm:  rf.snapshotTerm,
+				Data:              rf.snapshotData,
+			}
+			rf.mu.Unlock()
+
+			reply := &InstallSnapshotReply{}
+			rf.sendInstallSnapshot(peer, args, reply)
+
+			rf.mu.Lock()
+
+			if rf.state != Leader || rf.currentTerm != args.Term {
+				rf.mu.Unlock()
+				return
+			}
+
+			if reply.Term > rf.currentTerm {
+				rf.state = Follower
+				rf.currentTerm = reply.Term
+				rf.votedFor = -1
+				rf.persist()
+				rf.mu.Unlock()
+				return
+			}
+
+			rf.nextIndex[peer] = rf.snapshotIndex + 1
+			rf.matchIndex[peer] = rf.snapshotIndex
+
+			rf.mu.Unlock()
+			continue
+		}
+
+		DPrintf("9!!! calling getLog for index %v", prevIndex)
 		prevTerm := rf.getLog(prevIndex).Term
-		// var prevTerm int
-		// if prevIndex < rf.localToGlobal(len(rf.log)) {
-		// 	prevTerm = rf.getLog(prevIndex).Term
-		// } else {
-		// 	// prevIndex is before our snapshot -> we should send InstallSnapshot in real impl.
-		// 	// For now: treat as term 0 (or better, trigger snapshot install path)
-		// 	prevTerm = 0
-		// }
 
 		var entries []LogEntry
 		if rf.nextIndex[peer] < rf.localToGlobal(len(rf.log)) {
@@ -458,6 +580,7 @@ func (rf *Raft) replicationHeartbeatLoop(peer int) {
 		rf.mu.Unlock()
 
 		reply := &AppendEntriesReply{}
+		DPrintf("server %v sending append entries to peer %v, prevLogIndex %v, prevLogTerm %v, entries %v, leaderCommit %v snapshotIndex: %v\n leaderLog %v", rf.me, peer, prevIndex, prevTerm, entries, rf.commitIndex, rf.snapshotIndex, rf.log)
 		ok := rf.sendAppendEntries(peer, args, reply)
 		if !ok {
 			time.Sleep(10 * time.Millisecond)
@@ -479,9 +602,12 @@ func (rf *Raft) replicationHeartbeatLoop(peer int) {
 			return
 		}
 
+		// the next index wasn't updated when snapshot index was updated
 		if reply.Success {
 			rf.matchIndex[peer] = args.PrevLogIndex + len(args.Entries)
 			rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+
+			DPrintf("setting matchIndex and nextIndex for peer %v to %v and %v, len of entries: %v\n", peer, rf.matchIndex[peer], rf.nextIndex[peer], len(entries))
 
 			for N := len(rf.log) - 1; N > rf.globalToLocal(rf.commitIndex); N-- {
 				count := 1
@@ -491,8 +617,10 @@ func (rf *Raft) replicationHeartbeatLoop(peer int) {
 						count++
 					}
 				}
-				if count > len(rf.peers)/2 && rf.getLog(globalN).Term == rf.currentTerm {
+				DPrintf("10!!! calling getLog for index %v with commitIndex %v", globalN, rf.commitIndex)
+				if count > len(rf.peers)/2 && globalN > rf.snapshotIndex && rf.getLog(globalN).Term == rf.currentTerm {
 					rf.commitIndex = globalN
+					DPrintf("1 --- server: %v, snapshotIndex: %v, log: %v, commitIndex: %v", rf.me, rf.snapshotIndex, rf.log, rf.commitIndex)
 					rf.appendCond.Signal()
 					break
 				}
@@ -500,10 +628,42 @@ func (rf *Raft) replicationHeartbeatLoop(peer int) {
 		} else {
 			if reply.ConflictTerm == -1 {
 				rf.nextIndex[peer] = reply.ConflictIndex
+			} else if reply.ConflictIndex <= rf.snapshotIndex {
+				var ssArgs InstallSnapshotArgs
+				var ssReply InstallSnapshotReply
+
+				ssArgs.LeaderId = rf.me
+				ssArgs.Term = rf.currentTerm
+				ssArgs.LastIncludedIndex = rf.snapshotIndex
+				ssArgs.LastIncludedTerm = rf.snapshotTerm
+				ssArgs.Data = rf.snapshotData
+
+				DPrintf("4 --- server: %v sending snapshot to peer %v, snapshotIndex: %v, conflictIndex: %v", rf.me, peer, rf.snapshotIndex, reply.ConflictIndex)
+				rf.mu.Unlock()
+				rf.sendInstallSnapshot(peer, &ssArgs, &ssReply)
+				rf.mu.Lock()
+
+				if rf.state != Leader || rf.currentTerm != ssArgs.Term {
+					rf.mu.Unlock()
+					return
+				}
+
+				if reply.Term > rf.currentTerm {
+					rf.state = Follower
+					rf.currentTerm = reply.Term
+					rf.votedFor = -1
+					rf.persist()
+					rf.mu.Unlock()
+					return
+				}
+
+				rf.nextIndex[peer] = rf.snapshotIndex + 1
+				rf.matchIndex[peer] = rf.snapshotIndex
 			} else {
 				foundTerm := false
 				for i := len(rf.log) - 1; i >= 0; i-- {
 					globalIndex := rf.localToGlobal(i)
+					DPrintf("11!!! calling getLog for index %v", globalIndex)
 					if rf.getLog(globalIndex).Term == reply.ConflictTerm {
 						rf.nextIndex[peer] = rf.localToGlobal(i + 1)
 						foundTerm = true
@@ -571,15 +731,17 @@ func (rf *Raft) startElection() {
 	rf.voteCount = 1
 	term := rf.currentTerm
 	lastLogIndex := rf.localToGlobal(len(rf.log) - 1)
+	DPrintf("server %v: 12!!! calling getLog for index %v", rf.me, lastLogIndex)
 	lastLogTerm := rf.getLog(lastLogIndex).Term
 	rf.persist()
 	rf.mu.Unlock()
 
 	args := &RequestVoteArgs{
-		Term:         term,
-		CandidateId:  rf.me,
-		LastLogIndex: lastLogIndex,
-		LastLogTerm:  lastLogTerm,
+		Term:          term,
+		CandidateId:   rf.me,
+		LastLogIndex:  lastLogIndex,
+		LastLogTerm:   lastLogTerm,
+		SnapshotIndex: rf.snapshotIndex,
 	}
 
 	for i := range rf.peers {
@@ -668,12 +830,12 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *tester.Persister, applyC
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.state = Follower
+
 	rf.snapshotIndex = 0
+	rf.snapshotTerm = 0
+	rf.snapshotData = nil
 
 	rf.voteCount = 0
-
-	rf.nextIndex = make([]int, len(peers))
-	rf.matchIndex = make([]int, len(peers))
 
 	rf.heartbeatInterval = 50 * time.Millisecond
 	rf.electionTimeout = time.Duration(300+rand.Int63n(200)) * time.Millisecond
@@ -683,6 +845,14 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *tester.Persister, applyC
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIndex = make([]int, len(peers))
+
+	for i := range len(peers) {
+		rf.nextIndex[i] = rf.localToGlobal(len(rf.log))
+		rf.matchIndex[i] = rf.localToGlobal(0)
+	}
+
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
@@ -691,3 +861,173 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *tester.Persister, applyC
 
 	return rf
 }
+
+/*
+allantan@Allans-MacBook-Pro-2 raft1 % go test -run  3D
+Test (3D): snapshots basic (reliable network)...
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 0, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 0, prevLogTerm 0, entries [], leaderCommit 0 snapshotIndex: 0
+ leaderLog [{0 <nil>}]
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 0, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 0, prevLogTerm 0, entries [], leaderCommit 0 snapshotIndex: 0
+ leaderLog [{0 <nil>}]
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 0 and 1, len of entries: 0
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 0 and 1, len of entries: 0
+2025/10/29 21:04:48 server 1 received command 7440372602385688108
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 0, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 0, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 0, prevLogTerm 0, entries [{1 7440372602385688108}], leaderCommit 0 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 0, prevLogTerm 0, entries [{1 7440372602385688108}], leaderCommit 0 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 1
+2025/10/29 21:04:48 1 --- server: 1, snapshotIndex: 0, log: [{0 <nil>} {1 7440372602385688108}], commitIndex: 1
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 1
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 3 --- server: 2, snapshotIndex: 0, log: [{0 <nil>} {1 7440372602385688108}], commitIndex: 1
+2025/10/29 21:04:48 3 --- server: 0, snapshotIndex: 0, log: [{0 <nil>} {1 7440372602385688108}], commitIndex: 1
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108}]
+2025/10/29 21:04:48 server 1 received command 5007609618172841821
+2025/10/29 21:04:48 server 1 received command 1917305239113047399
+2025/10/29 21:04:48 server 1 received command 686492304036022527
+2025/10/29 21:04:48 server 1 received command 4300856831025091835
+2025/10/29 21:04:48 server 1 received command 4843792293493884855
+2025/10/29 21:04:48 server 1 received command 4186176899482846688
+2025/10/29 21:04:48 server 1 received command 6214593294378605025
+2025/10/29 21:04:48 server 1 received command 3012895538784177463
+2025/10/29 21:04:48 server 1 received command 4878217269708061000
+2025/10/29 21:04:48 server 1 received command 3418920525154298297
+2025/10/29 21:04:48 server 1 received command 3792320981854180277
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
+2025/10/29 21:04:48 server 1 received command 3893028549975232617
+2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [{1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277}], leaderCommit 1 snapshotIndex: 0
+ leaderLog [{0 <nil>} {1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277}]
+2025/10/29 21:04:48 server 1 received command 3308762028591196658
+2025/10/29 21:04:48 server 1 received command 7061107158403092519
+2025/10/29 21:04:48 server 1 received command 5817618706846720487
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 12 and 13, len of entries: 11
+2025/10/29 21:04:48 1 --- server: 1, snapshotIndex: 0, log: [{0 <nil>} {1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}], commitIndex: 12
+2025/10/29 21:04:48 SNAPSHOTTING for server: 1 at index 9
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 12, snapshotIndex: 9, isSmaller: false
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 9, isSmaller: true
+2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 12, prevLogTerm 1, entries [{1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}], leaderCommit 12 snapshotIndex: 9
+ leaderLog [{0 <nil>} {1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}]
+2025/10/29 21:04:48 5 --- server: 1, prevIndex: 1, snapshotIndex: 9, log: [{0 <nil>} {1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}]
+2025/10/29 21:04:48 3 --- server: 2, snapshotIndex: 0, log: [{0 <nil>} {1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}], commitIndex: 12
+2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 9, snapshotIndex: 9, isSmaller: false
+2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 9, prevLogTerm 0, entries [{1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}], leaderCommit 12 snapshotIndex: 9
+ leaderLog [{0 <nil>} {1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}]
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 25 and 26, len of entries: 13
+2025/10/29 21:04:48 1 --- server: 1, snapshotIndex: 9, log: [{0 <nil>} {1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}], commitIndex: 25
+2025/10/29 21:04:48 SNAPSHOTTING for server: 2 at index 9
+2025/10/29 21:04:48 SNAPSHOTTING for server: 1 at index 19
+2025/10/29 21:04:48 3 --- server: 0, snapshotIndex: 9, log: [{0 <nil>} {1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}], commitIndex: 12
+2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 25 and 26, len of entries: 16
+info: wrote visualization to /var/folders/3s/zmqcs9qx3fx6_ffrfcjscpy40000gn/T/porcupine-1897147642.html
+2025/10/29 21:04:48 apply error: commit index=10 server=0 7440372602385688108 != server=2 4878217269708061000
+exit status 1
+FAIL    cpsc416-2025w1/raft1    1.404s
+
+2025/10/29 21:04:48 3 --- server: 2, snapshotIndex: 0, log: [{0 <nil>} {1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}], commitIndex: 12
+2025/10/29 21:04:48 3 --- server: 0, snapshotIndex: 9, log: [{0 <nil>} {1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}], commitIndex: 12
+
+
+2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [{1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277}], leaderCommit 1 snapshotIndex: 0
+2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 12, prevLogTerm 1, entries [{1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}], leaderCommit 12 snapshotIndex: 9
+
+next index = 13
+snapshot index = 9
+
+[4: end]
+
+*/
