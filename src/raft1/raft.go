@@ -446,15 +446,29 @@ func (rf *Raft) applier() {
 	for !rf.killed() {
 		rf.mu.Lock()
 
+		if rf.lastApplied < rf.snapshotIndex {
+			// snapshotMsg := raftapi.ApplyMsg{
+			// 	SnapshotValid: true,
+			// 	Snapshot:      rf.snapshotData,
+			// 	SnapshotTerm:  rf.snapshotTerm,
+			// 	SnapshotIndex: rf.snapshotIndex,
+			// }
+			rf.lastApplied = rf.snapshotIndex
+			rf.mu.Unlock()
+
+			// rf.applyCh <- snapshotMsg
+			continue
+		}
+
 		for rf.commitIndex <= rf.lastApplied {
 			rf.appendCond.Wait()
 		}
 
-		if rf.lastApplied < rf.snapshotIndex {
-			rf.lastApplied = rf.snapshotIndex
-			rf.mu.Unlock()
-			continue
-		}
+		// if rf.lastApplied < rf.snapshotIndex {
+		// 	rf.lastApplied = rf.snapshotIndex
+		// 	rf.mu.Unlock()
+		// 	continue
+		// }
 
 		messages := []raftapi.ApplyMsg{}
 		for rf.commitIndex > rf.lastApplied {
@@ -503,7 +517,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		term = rf.currentTerm
 		isLeader = true
 		rf.persist()
-		// logs get replicated in replicationHeartbeatLoop
 	}
 
 	return index, term, isLeader
@@ -838,7 +851,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *tester.Persister, applyC
 	rf.voteCount = 0
 
 	rf.heartbeatInterval = 50 * time.Millisecond
-	rf.electionTimeout = time.Duration(300+rand.Int63n(200)) * time.Millisecond
+	rf.electionTimeout = time.Duration(500+rand.Int63n(600)) * time.Millisecond
 	rf.lastHeartbeat = time.Now()
 	// May need to add timeout for candidate
 
@@ -848,7 +861,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *tester.Persister, applyC
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
 
-	for i := range len(peers) {
+	for i := range peers {
 		rf.nextIndex[i] = rf.localToGlobal(len(rf.log))
 		rf.matchIndex[i] = rf.localToGlobal(0)
 	}
