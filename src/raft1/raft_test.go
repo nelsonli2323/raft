@@ -99,38 +99,38 @@ func TestReElection3A(t *testing.T) {
 	ts.checkOneLeader()
 }
 
-// func TestManyElections3A(t *testing.T) {
-// 	servers := 7
-// 	ts := makeTest(t, servers, true, false)
-// 	defer ts.cleanup()
+func TestManyElections3A(t *testing.T) {
+	servers := 7
+	ts := makeTest(t, servers, true, false)
+	defer ts.cleanup()
 
-// 	tester.AnnotateTest("TestManyElection3A", servers)
-// 	ts.Begin("Test (3A): multiple elections")
+	tester.AnnotateTest("TestManyElection3A", servers)
+	ts.Begin("Test (3A): multiple elections")
 
-// 	ts.checkOneLeader()
+	ts.checkOneLeader()
 
-// 	iters := 10
-// 	for ii := 1; ii < iters; ii++ {
-// 		// disconnect three nodes
-// 		i1 := rand.Int() % servers
-// 		i2 := rand.Int() % servers
-// 		i3 := rand.Int() % servers
-// 		ts.g.DisconnectAll(i1)
-// 		ts.g.DisconnectAll(i2)
-// 		ts.g.DisconnectAll(i3)
-// 		tester.AnnotateConnection(ts.g.GetConnected())
+	iters := 10
+	for ii := 1; ii < iters; ii++ {
+		// disconnect three nodes
+		i1 := rand.Int() % servers
+		i2 := rand.Int() % servers
+		i3 := rand.Int() % servers
+		ts.g.DisconnectAll(i1)
+		ts.g.DisconnectAll(i2)
+		ts.g.DisconnectAll(i3)
+		tester.AnnotateConnection(ts.g.GetConnected())
 
-// 		// either the current leader should still be alive,
-// 		// or the remaining four should elect a new one.
-// 		ts.checkOneLeader()
+		// either the current leader should still be alive,
+		// or the remaining four should elect a new one.
+		ts.checkOneLeader()
 
-// 		ts.g.ConnectOne(i1)
-// 		ts.g.ConnectOne(i2)
-// 		ts.g.ConnectOne(i3)
-// 		tester.AnnotateConnection(ts.g.GetConnected())
-// 	}
-// 	ts.checkOneLeader()
-// }
+		ts.g.ConnectOne(i1)
+		ts.g.ConnectOne(i2)
+		ts.g.ConnectOne(i3)
+		tester.AnnotateConnection(ts.g.GetConnected())
+	}
+	ts.checkOneLeader()
+}
 
 func TestBasicAgree3B(t *testing.T) {
 	servers := 3
@@ -1308,7 +1308,6 @@ func TestSnapshotInstallUnreliable3D(t *testing.T) {
 		true, false, false)
 }
 
-
 func TestSnapshotInstallCrash3D(t *testing.T) {
 	snapcommon(t, "Test (3D): install snapshots (crash)", false, true, true)
 }
@@ -1325,27 +1324,27 @@ func TestSnapshotAllCrash3D(t *testing.T) {
 	iters := 5
 	ts := makeTest(t, servers, false, true)
 	defer ts.cleanup()
-	
+
 	tester.AnnotateTest("TestSnapshotAllCrash3D", servers)
 	ts.Begin("Test (3D): crash and restart all servers")
-	
+
 	ts.one(rand.Int(), servers, true)
-	
+
 	for i := 0; i < iters; i++ {
 		// perhaps enough to get a snapshot
 		nn := (SnapShotInterval / 2) + (rand.Int() % SnapShotInterval)
 		for i := 0; i < nn; i++ {
 			ts.one(rand.Int(), servers, true)
 		}
-		
+
 		index1 := ts.one(rand.Int(), servers, true)
-		
+
 		// crash all
 		ts.g.Shutdown()
 		tester.AnnotateShutdownAll()
 		ts.g.StartServers()
 		tester.AnnotateRestartAll()
-		
+
 		index2 := ts.one(rand.Int(), servers, true)
 		if index2 < index1+1 {
 			msg := fmt.Sprintf("index decreased from %v to %v", index1, index2)
@@ -1354,7 +1353,8 @@ func TestSnapshotAllCrash3D(t *testing.T) {
 		}
 	}
 }
-// passing ^^^^ 
+
+// passing ^^^^
 
 // do servers correctly initialize their in-memory copy of the snapshot, making
 // sure that future writes to persistent state don't lose state?
