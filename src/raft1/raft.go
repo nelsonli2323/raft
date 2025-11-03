@@ -7,7 +7,6 @@ package raft
 // Make() creates a new raft peer that implements the raft interface.
 
 import (
-	//	"bytes"
 	"bytes"
 	"fmt"
 	"math/rand"
@@ -15,7 +14,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	//	"cpsc416-2025w1/labgob"
 	"cpsc416-2025w1/labgob"
 	"cpsc416-2025w1/labrpc"
 	"cpsc416-2025w1/raftapi"
@@ -840,7 +838,6 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *tester.Persister, applyC
 	rf.heartbeatInterval = 50 * time.Millisecond
 	rf.electionTimeout = time.Duration(300+rand.Int63n(200)) * time.Millisecond
 	rf.lastHeartbeat = time.Now()
-	// May need to add timeout for candidate
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -861,173 +858,3 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *tester.Persister, applyC
 
 	return rf
 }
-
-/*
-allantan@Allans-MacBook-Pro-2 raft1 % go test -run  3D
-Test (3D): snapshots basic (reliable network)...
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 0, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 0, prevLogTerm 0, entries [], leaderCommit 0 snapshotIndex: 0
- leaderLog [{0 <nil>}]
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 0, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 0, prevLogTerm 0, entries [], leaderCommit 0 snapshotIndex: 0
- leaderLog [{0 <nil>}]
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 0 and 1, len of entries: 0
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 0 and 1, len of entries: 0
-2025/10/29 21:04:48 server 1 received command 7440372602385688108
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 0, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 0, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 0, prevLogTerm 0, entries [{1 7440372602385688108}], leaderCommit 0 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 0, prevLogTerm 0, entries [{1 7440372602385688108}], leaderCommit 0 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 1
-2025/10/29 21:04:48 1 --- server: 1, snapshotIndex: 0, log: [{0 <nil>} {1 7440372602385688108}], commitIndex: 1
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 1
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 3 --- server: 2, snapshotIndex: 0, log: [{0 <nil>} {1 7440372602385688108}], commitIndex: 1
-2025/10/29 21:04:48 3 --- server: 0, snapshotIndex: 0, log: [{0 <nil>} {1 7440372602385688108}], commitIndex: 1
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 1, prevLogTerm 1, entries [], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108}]
-2025/10/29 21:04:48 server 1 received command 5007609618172841821
-2025/10/29 21:04:48 server 1 received command 1917305239113047399
-2025/10/29 21:04:48 server 1 received command 686492304036022527
-2025/10/29 21:04:48 server 1 received command 4300856831025091835
-2025/10/29 21:04:48 server 1 received command 4843792293493884855
-2025/10/29 21:04:48 server 1 received command 4186176899482846688
-2025/10/29 21:04:48 server 1 received command 6214593294378605025
-2025/10/29 21:04:48 server 1 received command 3012895538784177463
-2025/10/29 21:04:48 server 1 received command 4878217269708061000
-2025/10/29 21:04:48 server 1 received command 3418920525154298297
-2025/10/29 21:04:48 server 1 received command 3792320981854180277
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 0, isSmaller: false
-2025/10/29 21:04:48 server 1 received command 3893028549975232617
-2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [{1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277}], leaderCommit 1 snapshotIndex: 0
- leaderLog [{0 <nil>} {1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277}]
-2025/10/29 21:04:48 server 1 received command 3308762028591196658
-2025/10/29 21:04:48 server 1 received command 7061107158403092519
-2025/10/29 21:04:48 server 1 received command 5817618706846720487
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 1 and 2, len of entries: 0
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 12 and 13, len of entries: 11
-2025/10/29 21:04:48 1 --- server: 1, snapshotIndex: 0, log: [{0 <nil>} {1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}], commitIndex: 12
-2025/10/29 21:04:48 SNAPSHOTTING for server: 1 at index 9
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 12, snapshotIndex: 9, isSmaller: false
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 1, snapshotIndex: 9, isSmaller: true
-2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 12, prevLogTerm 1, entries [{1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}], leaderCommit 12 snapshotIndex: 9
- leaderLog [{0 <nil>} {1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}]
-2025/10/29 21:04:48 5 --- server: 1, prevIndex: 1, snapshotIndex: 9, log: [{0 <nil>} {1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}]
-2025/10/29 21:04:48 3 --- server: 2, snapshotIndex: 0, log: [{0 <nil>} {1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}], commitIndex: 12
-2025/10/29 21:04:48 5.1 --- server: 1, prevIndex: 9, snapshotIndex: 9, isSmaller: false
-2025/10/29 21:04:48 server 1 sending append entries to peer 0, prevLogIndex 9, prevLogTerm 0, entries [{1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}], leaderCommit 12 snapshotIndex: 9
- leaderLog [{0 <nil>} {1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}]
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 2 to 25 and 26, len of entries: 13
-2025/10/29 21:04:48 1 --- server: 1, snapshotIndex: 9, log: [{0 <nil>} {1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}], commitIndex: 25
-2025/10/29 21:04:48 SNAPSHOTTING for server: 2 at index 9
-2025/10/29 21:04:48 SNAPSHOTTING for server: 1 at index 19
-2025/10/29 21:04:48 3 --- server: 0, snapshotIndex: 9, log: [{0 <nil>} {1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}], commitIndex: 12
-2025/10/29 21:04:48 setting matchIndex and nextIndex for peer 0 to 25 and 26, len of entries: 16
-info: wrote visualization to /var/folders/3s/zmqcs9qx3fx6_ffrfcjscpy40000gn/T/porcupine-1897147642.html
-2025/10/29 21:04:48 apply error: commit index=10 server=0 7440372602385688108 != server=2 4878217269708061000
-exit status 1
-FAIL    cpsc416-2025w1/raft1    1.404s
-
-2025/10/29 21:04:48 3 --- server: 2, snapshotIndex: 0, log: [{0 <nil>} {1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}], commitIndex: 12
-2025/10/29 21:04:48 3 --- server: 0, snapshotIndex: 9, log: [{0 <nil>} {1 7440372602385688108} {1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}], commitIndex: 12
-
-
-2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 1, prevLogTerm 1, entries [{1 5007609618172841821} {1 1917305239113047399} {1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277}], leaderCommit 1 snapshotIndex: 0
-2025/10/29 21:04:48 server 1 sending append entries to peer 2, prevLogIndex 12, prevLogTerm 1, entries [{1 686492304036022527} {1 4300856831025091835} {1 4843792293493884855} {1 4186176899482846688} {1 6214593294378605025} {1 3012895538784177463} {1 4878217269708061000} {1 3418920525154298297} {1 3792320981854180277} {1 3893028549975232617} {1 3308762028591196658} {1 7061107158403092519} {1 5817618706846720487}], leaderCommit 12 snapshotIndex: 9
-
-next index = 13
-snapshot index = 9
-
-[4: end]
-
-*/
